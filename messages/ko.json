@@ -751,7 +751,39 @@
         "errorLoadTags": "태그를 불러오지 못했습니다",
         "errorLoadFields": "커스텀 필드를 불러오지 못했습니다",
         "errorCsvParse": "CSV 파일을 파싱할 수 없습니다.",
-        "errorCsvMissingPhone": "CSV에 'phone' 열이 있어야 합니다."
+        "errorCsvMissingPhone": "CSV에 'phone' 열이 있어야 합니다.",
+        "csvPanel": {
+          "dropOrClick": "CSV 파일을 여기에 끌어 놓거나 클릭하여 선택하세요",
+          "hint": "행 하나가 연락처 하나입니다. 열 이름은 자유롭게 사용해도 됩니다 — 다음 단계에서 매핑합니다.",
+          "rowsFound": "{count}개 행 찾음",
+          "columnMapping": "열 매핑",
+          "csvColumn": "CSV 열",
+          "sample": "샘플",
+          "columnLetter": "{letter} 열",
+          "pickAgain": "다른 파일 선택",
+          "loadingCustomFields": "커스텀 필드를 불러오는 중…",
+          "preview": "미리보기 (전체 {total}개 중 {count}개)",
+          "mapTo": {
+            "label": "매핑 대상",
+            "ignore": "— 무시 —",
+            "phone": "전화번호 (필수)",
+            "name": "이름",
+            "email": "이메일",
+            "company": "회사",
+            "customFieldGroup": "커스텀 필드"
+          },
+          "summary": {
+            "valid": "수신자 {count}명",
+            "noPhone": "{count}개 건너뜀 (전화번호 없음)",
+            "invalidPhone": "{count}개 건너뜀 (전화번호 형식 오류)",
+            "duplicates": "중복 {count}개 제거됨",
+            "total": "파일 내 총 {count}행"
+          },
+          "errorNoPhoneMapping": "계속하려면 열 하나를 전화번호로 매핑하세요.",
+          "errorEmptyFile": "해당 파일에 데이터 행이 없습니다.",
+          "errorParse": "파일을 읽을 수 없습니다. 유효한 CSV인지 확인하세요.",
+          "errorTooLarge": "파일 크기가 5MB를 초과합니다. 분할하거나 줄여 주세요."
+        }
       },
       "personalize": {
         "title": "변수 개인화",

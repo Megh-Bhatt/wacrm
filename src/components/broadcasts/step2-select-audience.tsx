@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
+import { CsvAudiencePanel, type CsvContactRow } from './csv-audience-panel';
 
 type AudienceType = 'all' | 'tags' | 'custom_field' | 'csv';
 type CustomFieldOperator = 'is' | 'is_not' | 'contains';
@@ -29,7 +30,7 @@ interface AudienceConfig {
   type: AudienceType;
   tagIds?: string[];
   customField?: CustomFieldFilter;
-  csvContacts?: { phone: string; name?: string }[];
+  csvContacts?: CsvContactRow[];
   excludeTagIds?: string[];
 }
 
@@ -389,6 +390,12 @@ export function Step2SelectAudience({
             </div>
           )}
         </div>
+      )}
+
+      {audience.type === 'csv' && (
+        <CsvAudiencePanel
+          onChange={(rows) => onUpdate({ ...audience, csvContacts: rows })}
+        />
       )}
 
       {/* Exclude list — applies regardless of audience type */}

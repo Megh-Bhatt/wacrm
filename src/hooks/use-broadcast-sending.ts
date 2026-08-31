@@ -7,6 +7,7 @@ import {
   BATCH_SEND_ATTEMPTS,
   batchRetryDelayMs,
 } from '@/lib/broadcast-retry';
+import { normalizePhone } from '@/lib/whatsapp/phone-utils';
 import { Contact, MessageTemplate } from '@/types';
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
@@ -21,7 +22,17 @@ export interface AudienceConfig {
   type: 'all' | 'tags' | 'custom_field' | 'csv';
   tagIds?: string[];
   customField?: CustomFieldFilter;
-  csvContacts?: { phone: string; name?: string }[];
+  /**
+   * Rows from the wizard's CSV upload. `customValues` — keyed by
+   * `custom_fields.id` — is used only to resolve template variables for
+   * this broadcast; it is NOT written back to `contact_custom_values`
+   * (see plan). Missing values fall through to the DB index.
+   */
+  csvContacts?: {
+    phone: string;
+    name?: string;
+    customValues?: Record<string, string>;
+  }[];
   /** Contacts carrying any of these tags are subtracted from the result. */
   excludeTagIds?: string[];
 }
@@ -161,10 +172,24 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  async function resolveAudience(audience: AudienceConfig): Promise<Contact[]> {
+  /**
+   * `csvOverrides` carries per-row custom-field values from a CSV upload
+   * so template variables can resolve to CSV-supplied data without a
+   * write to `contact_custom_values`. Keyed by contact_id → field_id → value.
+   * Empty (no CSV audience) is the common case.
+   */
+  interface ResolvedAudience {
+    contacts: Contact[];
+    csvOverrides: Map<string, Map<string, string>>;
+  }
+
+  async function resolveAudience(
+    audience: AudienceConfig,
+  ): Promise<ResolvedAudience> {
     const supabase = createClient();
 
     let contacts: Contact[] = [];
+    let csvOverrides: Map<string, Map<string, string>> = new Map();
 
     if (audience.type === 'all') {
       const { data, error } = await supabase.from('contacts').select('*');
@@ -197,7 +222,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     } else if (audience.type === 'custom_field' && audience.customField) {
       contacts = await resolveCustomFieldAudience(supabase, audience.customField);
     } else if (audience.type === 'csv' && audience.csvContacts) {
-      contacts = await upsertCsvContacts(supabase, audience.csvContacts);
+      const upsertResult = await upsertCsvContacts(supabase, audience.csvContacts);
+      contacts = upsertResult.contacts;
+      csvOverrides = upsertResult.csvOverrides;
     }
 
     // Apply exclude tags (works across all contact-derived audience
@@ -211,7 +238,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       contacts = contacts.filter((c) => !excludedIds.has(c.id));
     }
 
-    return contacts;
+    return { contacts, csvOverrides };
   }
 
   /**
@@ -225,11 +252,22 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
    * contact_id, which failed the UUID cast on insert — every CSV
    * broadcast silently created zero recipients.
    */
+  interface CsvUpsertResult {
+    contacts: Contact[];
+    csvOverrides: Map<string, Map<string, string>>;
+  }
+
   async function upsertCsvContacts(
     supabase: ReturnType<typeof createClient>,
-    csvRows: { phone: string; name?: string }[],
-  ): Promise<Contact[]> {
-    if (csvRows.length === 0) return [];
+    csvRows: {
+      phone: string;
+      name?: string;
+      customValues?: Record<string, string>;
+    }[],
+  ): Promise<CsvUpsertResult> {
+    if (csvRows.length === 0) {
+      return { contacts: [], csvOverrides: new Map() };
+    }
 
     const {
       data: { session },
@@ -242,38 +280,55 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       throw new Error('Your profile is not linked to an account.');
     }
 
-    // De-duplicate by phone within the CSV (users can paste duplicates).
-    const uniqueByPhone = new Map<string, { phone: string; name?: string }>();
+    // De-duplicate by NORMALIZED phone. Previous impl used the raw
+    // string, which broke against the account-scoped uniqueness on
+    // `contacts.phone_normalized` (migration 022): a CSV `+15551234567`
+    // against a DB `15551234567` would insert-and-crash mid-send.
+    const uniqueByKey = new Map<
+      string,
+      { phone: string; name?: string; customValues?: Record<string, string> }
+    >();
     for (const row of csvRows) {
-      if (row.phone) uniqueByPhone.set(row.phone, row);
+      if (!row.phone) continue;
+      const key = normalizePhone(row.phone);
+      if (!key) continue;
+      if (!uniqueByKey.has(key)) uniqueByKey.set(key, row);
     }
-    const phones = [...uniqueByPhone.keys()];
+    const keys = [...uniqueByKey.keys()];
 
-    // Single round-trip lookup of existing contacts by phone.
+    // Look up existing rows by the generated `phone_normalized` column
+    // rather than by raw `phone`, so we find matches across format variants.
+    // Scoped by account_id (the tenancy key from migration 017) rather than
+    // user_id, so a teammate's earlier import still deduplicates cleanly.
     const { data: existing, error: lookupErr } = await supabase
       .from('contacts')
       .select('*')
-      .eq('user_id', user.id)
-      .in('phone', phones);
+      .eq('account_id', accountId)
+      .in('phone_normalized', keys);
     if (lookupErr) {
       throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
     }
 
-    const byPhone = new Map<string, Contact>();
+    const byKey = new Map<string, Contact>();
     for (const c of (existing ?? []) as Contact[]) {
-      if (c.phone) byPhone.set(c.phone, c);
+      const k = c.phone_normalized ?? normalizePhone(c.phone);
+      if (k) byKey.set(k, c);
     }
 
-    // Insert only missing contacts, in one batch per 200 rows (PostgREST
-    // has a default payload cap — 200 keeps individual requests small).
-    const missing = phones
-      .filter((p) => !byPhone.has(p))
-      .map((phone) => ({
-        user_id: user.id,
-        account_id: accountId,
-        phone,
-        name: uniqueByPhone.get(phone)?.name ?? null,
-      }));
+    // Insert only missing contacts. `phone` stores the raw string the user
+    // supplied so display/edit flows keep the original formatting; the
+    // generated `phone_normalized` column supplies the uniqueness key.
+    const missing = keys
+      .filter((k) => !byKey.has(k))
+      .map((k) => {
+        const row = uniqueByKey.get(k)!;
+        return {
+          user_id: user.id,
+          account_id: accountId,
+          phone: row.phone,
+          name: row.name ?? null,
+        };
+      });
 
     const INSERT_CHUNK = 200;
     for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
@@ -286,14 +341,34 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         throw new Error(`Failed to create CSV contacts: ${insertErr.message}`);
       }
       for (const c of (inserted ?? []) as Contact[]) {
-        if (c.phone) byPhone.set(c.phone, c);
+        const k = c.phone_normalized ?? normalizePhone(c.phone);
+        if (k) byKey.set(k, c);
       }
     }
 
     // Preserve input order so analytics roughly matches the CSV order.
-    return phones
-      .map((p) => byPhone.get(p))
+    const contacts = keys
+      .map((k) => byKey.get(k))
       .filter((c): c is Contact => Boolean(c));
+
+    // Layer CSV-supplied custom values onto the DB index later. Keyed by
+    // contact_id → field_id → value; only rows with real customValues
+    // contribute, so the map stays empty for CSVs with no custom mapping.
+    const csvOverrides = new Map<string, Map<string, string>>();
+    for (const k of keys) {
+      const row = uniqueByKey.get(k);
+      const contact = byKey.get(k);
+      if (!row?.customValues || !contact) continue;
+      const bucket = new Map<string, string>();
+      for (const [fieldId, value] of Object.entries(row.customValues)) {
+        if (value !== undefined && value !== null && value !== '') {
+          bucket.set(fieldId, value);
+        }
+      }
+      if (bucket.size > 0) csvOverrides.set(contact.id, bucket);
+    }
+
+    return { contacts, csvOverrides };
   }
 
   async function resolveCustomFieldAudience(
@@ -354,7 +429,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
       // ── Step 1: Resolve audience contacts ─────────────────────────
       setProgress(5);
-      const contacts = await resolveAudience(payload.audience);
+      const { contacts, csvOverrides } = await resolveAudience(payload.audience);
 
       if (contacts.length === 0) {
         throw new Error('No contacts found for this audience.');
@@ -407,13 +482,26 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         supabase,
         contacts.map((c) => c.id),
       );
+
+      // CSV-supplied per-row values (used only for this send — never
+      // written to `contact_custom_values`) win over the DB index.
+      // Missing CSV cells fall through to whatever is on the contact.
+      function customValuesFor(contactId: string): Map<string, string> | undefined {
+        const dbValues = customValueIndex.get(contactId);
+        const overrides = csvOverrides.get(contactId);
+        if (!overrides) return dbValues;
+        const merged = new Map(dbValues ?? []);
+        for (const [fieldId, value] of overrides) merged.set(fieldId, value);
+        return merged;
+      }
+
       const paramsByContact = new Map(
         contacts.map((contact) => [
           contact.id,
           resolveVariables(
             payload.variables,
             contact,
-            customValueIndex.get(contact.id),
+            customValuesFor(contact.id),
           ),
         ]),
       );

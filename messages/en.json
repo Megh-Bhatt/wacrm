@@ -751,7 +751,39 @@
         "errorLoadTags": "Failed to load tags",
         "errorLoadFields": "Failed to load custom fields",
         "errorCsvParse": "Could not parse CSV file.",
-        "errorCsvMissingPhone": "CSV must have a 'phone' column."
+        "errorCsvMissingPhone": "CSV must have a 'phone' column.",
+        "csvPanel": {
+          "dropOrClick": "Drop your CSV here, or click to pick a file",
+          "hint": "One row per contact. Any column names are fine — you'll map them in the next step.",
+          "rowsFound": "{count, plural, one {# row found} other {# rows found}}",
+          "columnMapping": "Column mapping",
+          "csvColumn": "CSV column",
+          "sample": "Sample",
+          "columnLetter": "Column {letter}",
+          "pickAgain": "Pick another file",
+          "loadingCustomFields": "Loading custom fields…",
+          "preview": "Preview ({count} of {total})",
+          "mapTo": {
+            "label": "Map to",
+            "ignore": "— Ignore —",
+            "phone": "Phone (required)",
+            "name": "Name",
+            "email": "Email",
+            "company": "Company",
+            "customFieldGroup": "Custom fields"
+          },
+          "summary": {
+            "valid": "{count, plural, one {# recipient} other {# recipients}}",
+            "noPhone": "{count} skipped (no phone)",
+            "invalidPhone": "{count} skipped (invalid phone)",
+            "duplicates": "{count} duplicates removed",
+            "total": "{count, plural, one {# row in file} other {# rows in file}}"
+          },
+          "errorNoPhoneMapping": "Map one column to Phone to continue.",
+          "errorEmptyFile": "That file has no data rows.",
+          "errorParse": "Could not read that file. Is it a valid CSV?",
+          "errorTooLarge": "That file is over 5 MB. Split it or trim it."
+        }
       },
       "personalize": {
         "title": "Personalize Variables",

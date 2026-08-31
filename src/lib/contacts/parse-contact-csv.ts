@@ -1,7 +1,14 @@
 /**
  * CSV parsing for the contacts import modal. Shared + unit-tested so
  * tag-column handling stays aligned with phone/name/email/company.
+ *
+ * The generic tokenizer lives in `src/lib/csv/parse-csv.ts` so the
+ * broadcast wizard's column-mapping panel reuses the same splitter.
+ * This module keeps its historical shape — headers hard-coded to the
+ * import-modal contract (phone/name/email/company/tags).
  */
+
+import { parseCsvTable } from '@/lib/csv/parse-csv';
 
 export interface ParsedContactRow {
   phone: string;
@@ -39,78 +46,49 @@ export interface ParseContactCsvResult {
   hasCompanyColumn: boolean;
 }
 
+function cleanCell(cell: string | undefined): string {
+  // Legacy behavior: strip stray quotes/apostrophes that used to sneak
+  // in when the tokenizer didn't understand escaped quotes.
+  return cell?.replace(/["']/g, '').trim() ?? '';
+}
+
 export function parseContactCsv(text: string): ParseContactCsvResult {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) {
+  const { headers, rows } = parseCsvTable(text);
+
+  if (headers.length === 0 || rows.length === 0) {
     return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
   }
 
-  const headers = lines[0]
-    .split(',')
-    .map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
+  const normalized = headers.map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
 
-  const phoneIdx = headers.indexOf('phone');
+  const phoneIdx = normalized.indexOf('phone');
   if (phoneIdx === -1) {
     return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
   }
 
-  const nameIdx = headers.indexOf('name');
-  const emailIdx = headers.indexOf('email');
-  const companyIdx = headers.indexOf('company');
-  const tagsIdx = headers.indexOf('tags');
+  const nameIdx = normalized.indexOf('name');
+  const emailIdx = normalized.indexOf('email');
+  const companyIdx = normalized.indexOf('company');
+  const tagsIdx = normalized.indexOf('tags');
 
-  const rows: ParsedContactRow[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-
-    const values = parseCsvLine(line);
-    const phone = values[phoneIdx]?.replace(/["']/g, '').trim();
+  const parsed: ParsedContactRow[] = [];
+  for (const cells of rows) {
+    const phone = cleanCell(cells[phoneIdx]);
     if (!phone) continue;
 
-    rows.push({
+    parsed.push({
       phone,
-      name:
-        nameIdx >= 0
-          ? values[nameIdx]?.replace(/["']/g, '').trim() || undefined
-          : undefined,
-      email:
-        emailIdx >= 0
-          ? values[emailIdx]?.replace(/["']/g, '').trim() || undefined
-          : undefined,
+      name: nameIdx >= 0 ? cleanCell(cells[nameIdx]) || undefined : undefined,
+      email: emailIdx >= 0 ? cleanCell(cells[emailIdx]) || undefined : undefined,
       company:
-        companyIdx >= 0
-          ? values[companyIdx]?.replace(/["']/g, '').trim() || undefined
-          : undefined,
-      tagNames:
-        tagsIdx >= 0 ? parseTagCell(values[tagsIdx]?.replace(/["']/g, '')) : [],
+        companyIdx >= 0 ? cleanCell(cells[companyIdx]) || undefined : undefined,
+      tagNames: tagsIdx >= 0 ? parseTagCell(cleanCell(cells[tagsIdx])) : [],
     });
   }
 
   return {
-    rows,
+    rows: parsed,
     hasTagsColumn: tagsIdx >= 0,
     hasCompanyColumn: companyIdx >= 0,
   };
-}
-
-/** Simple CSV line parse (handles quoted fields). */
-function parseCsvLine(line: string): string[] {
-  const values: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (const char of line) {
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === ',' && !inQuotes) {
-      values.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  values.push(current.trim());
-  return values;
 }
