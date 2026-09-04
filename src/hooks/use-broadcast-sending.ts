@@ -371,18 +371,41 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     const INSERT_CHUNK = 200;
     for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
       const chunk = missing.slice(i, i + INSERT_CHUNK);
-      // Use upsert with ignoreDuplicates so a concurrent insert (or a
-      // paged-lookup miss) can't crash the whole batch on the
-      // (account_id, phone_normalized) unique index — the pre-existing
-      // row wins and we just re-select it below.
+      // Try a bulk insert first — the fast path when every row in the
+      // chunk is genuinely new. On duplicate-key (23505) we fall back to
+      // row-by-row inserts so a single collision does not fail the
+      // batch; already-existing rows are picked up by the re-fetch below.
+      //
+      // Note: we can't use PostgREST upsert(onConflict) here because the
+      // account_phone_normalized index is a PARTIAL unique index
+      // (`WHERE phone_normalized <> ''`, migration 022) and PostgREST's
+      // upsert cannot express the matching WHERE predicate — it errors
+      // with "no unique or exclusion constraint matching the ON CONFLICT
+      // specification".
       const { data: inserted, error: insertErr } = await supabase
         .from('contacts')
-        .upsert(chunk, {
-          onConflict: 'account_id,phone_normalized',
-          ignoreDuplicates: true,
-        })
+        .insert(chunk)
         .select();
       if (insertErr) {
+        if (insertErr.code === '23505') {
+          for (const row of chunk) {
+            const { data: one, error: oneErr } = await supabase
+              .from('contacts')
+              .insert(row)
+              .select()
+              .single();
+            if (oneErr) {
+              if (oneErr.code === '23505') continue; // pre-existing → re-fetched below
+              throw new Error(
+                `Failed to create CSV contacts: ${oneErr.message}`,
+              );
+            }
+            const c = one as Contact;
+            const k = c.phone_normalized ?? normalizePhone(c.phone);
+            if (k) byKey.set(k, c);
+          }
+          continue;
+        }
         throw new Error(`Failed to create CSV contacts: ${insertErr.message}`);
       }
       for (const c of (inserted ?? []) as Contact[]) {
