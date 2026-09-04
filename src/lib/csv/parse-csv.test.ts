@@ -85,4 +85,26 @@ describe('parseCsvTable', () => {
     const csv = 'name,note\nAlice,"say ""hi"""';
     expect(parseCsvTable(csv).rows).toEqual([['Alice', 'say "hi"']]);
   });
+
+  it('keeps newlines inside a quoted cell together with the rest of its row', () => {
+    // Real Excel export shape: a multi-line "PERSON NAME" cell wraps
+    // AMBRISH + CHAITALI onto two lines but they belong to one CSV row.
+    const csv =
+      'company,person,phone\n' +
+      'A K TRANSCHARGER,"AMBRISH PANDYA\nCHAITALI PANDYA",919725141557';
+    const parsed = parseCsvTable(csv);
+    expect(parsed.headers).toEqual(['company', 'person', 'phone']);
+    expect(parsed.rows).toEqual([
+      ['A K TRANSCHARGER', 'AMBRISH PANDYA\nCHAITALI PANDYA', '919725141557'],
+    ]);
+  });
+
+  it('handles a multi-line header cell', () => {
+    // Excel-exported header "CONTACT NO. \n(OWNER)" wraps to two lines
+    // but is still one header cell.
+    const csv = 'sr,"CONTACT NO. \n(OWNER)"\n1,919825172158';
+    const parsed = parseCsvTable(csv);
+    expect(parsed.headers).toEqual(['sr', 'CONTACT NO. \n(OWNER)']);
+    expect(parsed.rows).toEqual([['1', '919825172158']]);
+  });
 });

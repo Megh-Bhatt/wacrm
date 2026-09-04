@@ -68,14 +68,25 @@ const PREVIEW_ROWS = 5;
  * clearly matches a built-in target. Users can always override.
  */
 function guessBuiltInTarget(header: string): BuiltInTarget {
-  const h = header.trim().toLowerCase();
+  // Excel exports of multi-line header cells (e.g. "CONTACT NO. \n(OWNER)")
+  // arrive with embedded whitespace and punctuation. Collapse everything to
+  // a single lowercase space-separated form so a header called
+  // "CONTACT NO.\n(OWNER)" matches the same rule as "contact no owner".
+  const h = header
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
   if (!h) return 'ignore';
-  if (['phone', 'mobile', 'phone number', 'mobile number', 'whatsapp', 'msisdn', 'cell', 'cellphone'].includes(h)) {
+  if (
+    /(^| )(phone|mobile|whatsapp|msisdn|cell|cellphone|contact( no| number)?)( |$)/.test(
+      h,
+    )
+  ) {
     return 'phone';
   }
-  if (['name', 'full name', 'contact', 'contact name', 'first name'].includes(h)) return 'name';
-  if (['email', 'e-mail', 'email address'].includes(h)) return 'email';
-  if (['company', 'organization', 'organisation', 'business'].includes(h)) return 'company';
+  if (['name', 'full name', 'contact name', 'first name', 'person name', 'owner'].includes(h)) return 'name';
+  if (['email', 'e mail', 'email address'].includes(h)) return 'email';
+  if (['company', 'company name', 'organization', 'organisation', 'business'].includes(h)) return 'company';
   return 'ignore';
 }
 

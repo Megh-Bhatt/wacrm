@@ -10,10 +10,9 @@
  *   - a leading UTF-8 BOM (Excel exports produce one)
  *   - quoted fields with embedded commas
  *   - RFC-4180 escaped double quotes (`""` inside a quoted field → `"`)
- *
- * Does not support embedded newlines inside a quoted field. Neither did the
- * previous parser, and no caller relies on it; adding it would push us
- * toward a real dep (papaparse). Revisit only if a real user hits it.
+ *   - embedded newlines inside a quoted field (Excel/Sheets exports of
+ *     multi-line cells like "AMBRISH PANDYA\nCHAITALI PANDYA" and even
+ *     multi-line headers like "CONTACT NO. \n(OWNER)")
  */
 
 /**
@@ -70,39 +69,78 @@ export interface ParsedCsvTable {
  */
 export function parseCsvTable(text: string): ParsedCsvTable {
   // Excel exports commonly begin with a UTF-8 BOM. Strip it once at the
-  // top rather than inside the line splitter — otherwise the first header
+  // top rather than inside the scanner — otherwise the first header
   // silently comes back as `﻿phone` and every mapping-by-name fails.
   const stripped = text.replace(/^﻿/, '');
 
-  const lines = stripped.split(/\r?\n/);
+  // Character-level scanner. Splitting on `\r?\n` first would break
+  // real-world exports where a quoted cell spans lines — e.g.
+  //   "AMBRISH PANDYA\nCHAITALI PANDYA"
+  // or even a multi-line header like "CONTACT NO. \n(OWNER)". A newline
+  // is a row separator only when we are NOT inside quotes.
+  const allRows: string[][] = [];
+  let current = '';
+  let row: string[] = [];
+  let inQuotes = false;
 
-  // Trim trailing blank lines that most editors add.
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-    lines.pop();
+  const pushCell = () => {
+    row.push(current.trim());
+    current = '';
+  };
+  const pushRow = () => {
+    pushCell();
+    // Drop fully-blank rows (`,,,,`) — spreadsheet exports often add
+    // trailing empty rows.
+    if (!row.every((c) => c === '')) allRows.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        // RFC-4180: `""` inside quotes is a literal quote.
+        if (stripped[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+
+    // Not in quotes.
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      pushCell();
+    } else if (ch === '\r') {
+      // Swallow — the `\n` in \r\n handles the row break; a bare \r is rare.
+    } else if (ch === '\n') {
+      pushRow();
+    } else {
+      current += ch;
+    }
   }
+  // Flush the last row if the file did not end with a newline.
+  if (current.length > 0 || row.length > 0) pushRow();
 
-  if (lines.length === 0) {
-    return { headers: [], rows: [] };
-  }
+  if (allRows.length === 0) return { headers: [], rows: [] };
 
-  const headers = parseCsvLine(lines[0]);
-
+  const headers = allRows[0];
   const rows: string[][] = [];
-  for (let i = 1; i < lines.length; i++) {
-    // Preserve original whitespace-only detection but skip fully-empty lines.
-    if (lines[i].length === 0) continue;
-    const cells = parseCsvLine(lines[i]);
-
-    // Fully-blank rows (`,,,,`) are noise — drop them.
-    if (cells.every((c) => c === '')) continue;
-
+  for (let i = 1; i < allRows.length; i++) {
+    const cells = allRows[i];
     // Normalize width so callers can safely index by column position.
     if (cells.length < headers.length) {
       while (cells.length < headers.length) cells.push('');
     } else if (cells.length > headers.length) {
       cells.length = headers.length;
     }
-
     rows.push(cells);
   }
 
