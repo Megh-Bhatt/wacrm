@@ -31,6 +31,8 @@ export interface AudienceConfig {
   csvContacts?: {
     phone: string;
     name?: string;
+    email?: string;
+    company?: string;
     customValues?: Record<string, string>;
   }[];
   /** Contacts carrying any of these tags are subtracted from the result. */
@@ -262,6 +264,8 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     csvRows: {
       phone: string;
       name?: string;
+      email?: string;
+      company?: string;
       customValues?: Record<string, string>;
     }[],
   ): Promise<CsvUpsertResult> {
@@ -286,7 +290,13 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     // against a DB `15551234567` would insert-and-crash mid-send.
     const uniqueByKey = new Map<
       string,
-      { phone: string; name?: string; customValues?: Record<string, string> }
+      {
+        phone: string;
+        name?: string;
+        email?: string;
+        company?: string;
+        customValues?: Record<string, string>;
+      }
     >();
     for (const row of csvRows) {
       if (!row.phone) continue;
@@ -300,47 +310,84 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     // rather than by raw `phone`, so we find matches across format variants.
     // Scoped by account_id (the tenancy key from migration 017) rather than
     // user_id, so a teammate's earlier import still deduplicates cleanly.
-    const { data: existing, error: lookupErr } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('account_id', accountId)
-      .in('phone_normalized', keys);
-    if (lookupErr) {
-      throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
-    }
-
+    //
+    // Page the .in(...) filter: PostgREST puts every value into the URL
+    // query string, and a large CSV (1 000+ phones) overruns the URL
+    // length limit — the request silently returns a truncated set, so the
+    // insert below crashes on the account_phone_normalized unique index
+    // when it re-adds rows that already existed (issue with 1 013-row CSVs).
+    const LOOKUP_CHUNK = 200;
     const byKey = new Map<string, Contact>();
-    for (const c of (existing ?? []) as Contact[]) {
-      const k = c.phone_normalized ?? normalizePhone(c.phone);
-      if (k) byKey.set(k, c);
+    for (let i = 0; i < keys.length; i += LOOKUP_CHUNK) {
+      const chunk = keys.slice(i, i + LOOKUP_CHUNK);
+      const { data: existing, error: lookupErr } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('account_id', accountId)
+        .in('phone_normalized', chunk);
+      if (lookupErr) {
+        throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
+      }
+      for (const c of (existing ?? []) as Contact[]) {
+        const k = c.phone_normalized ?? normalizePhone(c.phone);
+        if (k) byKey.set(k, c);
+      }
     }
 
     // Insert only missing contacts. `phone` stores the raw string the user
     // supplied so display/edit flows keep the original formatting; the
     // generated `phone_normalized` column supplies the uniqueness key.
-    const missing = keys
-      .filter((k) => !byKey.has(k))
-      .map((k) => {
-        const row = uniqueByKey.get(k)!;
-        return {
-          user_id: user.id,
-          account_id: accountId,
-          phone: row.phone,
-          name: row.name ?? null,
-        };
-      });
+    const missingKeys = keys.filter((k) => !byKey.has(k));
+    const missing = missingKeys.map((k) => {
+      const row = uniqueByKey.get(k)!;
+      return {
+        user_id: user.id,
+        account_id: accountId,
+        phone: row.phone,
+        name: row.name ?? null,
+        email: row.email ?? null,
+        company: row.company ?? null,
+      };
+    });
 
     const INSERT_CHUNK = 200;
     for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
       const chunk = missing.slice(i, i + INSERT_CHUNK);
+      // Use upsert with ignoreDuplicates so a concurrent insert (or a
+      // paged-lookup miss) can't crash the whole batch on the
+      // (account_id, phone_normalized) unique index — the pre-existing
+      // row wins and we just re-select it below.
       const { data: inserted, error: insertErr } = await supabase
         .from('contacts')
-        .insert(chunk)
+        .upsert(chunk, {
+          onConflict: 'account_id,phone_normalized',
+          ignoreDuplicates: true,
+        })
         .select();
       if (insertErr) {
         throw new Error(`Failed to create CSV contacts: ${insertErr.message}`);
       }
       for (const c of (inserted ?? []) as Contact[]) {
+        const k = c.phone_normalized ?? normalizePhone(c.phone);
+        if (k) byKey.set(k, c);
+      }
+    }
+
+    // Any rows the upsert ignored (already existed) won't come back in
+    // `inserted`. Fetch those directly so every CSV phone resolves to a
+    // real contact row.
+    const stillMissing = missingKeys.filter((k) => !byKey.has(k));
+    for (let i = 0; i < stillMissing.length; i += LOOKUP_CHUNK) {
+      const chunk = stillMissing.slice(i, i + LOOKUP_CHUNK);
+      const { data: refetched, error: refetchErr } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('account_id', accountId)
+        .in('phone_normalized', chunk);
+      if (refetchErr) {
+        throw new Error(`Failed to re-fetch CSV contacts: ${refetchErr.message}`);
+      }
+      for (const c of (refetched ?? []) as Contact[]) {
         const k = c.phone_normalized ?? normalizePhone(c.phone);
         if (k) byKey.set(k, c);
       }

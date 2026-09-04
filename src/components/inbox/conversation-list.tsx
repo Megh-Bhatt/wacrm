@@ -9,7 +9,7 @@ import {
 } from "@/lib/inbox/conversations";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
-import { Search, ChevronDown, X } from "lucide-react";
+import { Search, ChevronDown, X, ChevronRight, Megaphone } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useTranslations } from "next-intl";
 import { Input } from "@/components/ui/input";
@@ -72,6 +72,16 @@ export function ConversationList({
   const [tags, setTags] = useState<Tag[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<string | null>(null);
+  // Group conversations by the latest broadcast each contact received.
+  // Off by default so the flat list stays the initial view; the toggle
+  // in the filter row flips it. Each contact's latest broadcast is
+  // pulled from `broadcast_recipients` — a contact with no send falls
+  // into the "No broadcast" group.
+  const [groupByBroadcast, setGroupByBroadcast] = useState(false);
+  const [broadcastByContact, setBroadcastByContact] = useState<
+    Map<string, { id: string; name: string }>
+  >(new Map());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   // Keep the latest callback in a ref so the fetch effect below can
   // have a stable, empty-dep identity. Previously the fetch useCallback
@@ -140,6 +150,51 @@ export function ConversationList({
     };
   }, []);
 
+  // For each contact in the loaded conversations, resolve the latest
+  // broadcast they were part of. Rows come back most-recent first so
+  // the first sighting of a contact wins. Paged in 200-id chunks to
+  // stay within PostgREST's URL length limit on large inboxes.
+  useEffect(() => {
+    if (conversations.length === 0) {
+      setBroadcastByContact(new Map());
+      return;
+    }
+    const supabase = createClient();
+    let cancelled = false;
+    (async () => {
+      const contactIds = [
+        ...new Set(conversations.map((c) => c.contact_id).filter(Boolean)),
+      ] as string[];
+      const CHUNK = 200;
+      const nextMap = new Map<string, { id: string; name: string }>();
+      for (let i = 0; i < contactIds.length; i += CHUNK) {
+        const slice = contactIds.slice(i, i + CHUNK);
+        const { data, error } = await supabase
+          .from("broadcast_recipients")
+          .select("contact_id, created_at, broadcast:broadcasts(id, name, created_at)")
+          .in("contact_id", slice)
+          .order("created_at", { ascending: false });
+        if (error || cancelled) return;
+        // PostgREST types embeds as arrays, but this FK is 1:1 so the
+        // array always holds 0 or 1 rows — take the head.
+        type Row = {
+          contact_id: string;
+          broadcast: { id: string; name: string } | { id: string; name: string }[] | null;
+        };
+        for (const row of (data ?? []) as unknown as Row[]) {
+          const b = Array.isArray(row.broadcast) ? row.broadcast[0] : row.broadcast;
+          if (!b) continue;
+          if (nextMap.has(row.contact_id)) continue;
+          nextMap.set(row.contact_id, { id: b.id, name: b.name });
+        }
+      }
+      if (!cancelled) setBroadcastByContact(nextMap);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversations]);
+
   // Company options are derived from the loaded conversations — there's no
   // separate companies table, and only companies with a live conversation
   // are worth offering as an inbox filter.
@@ -190,6 +245,49 @@ export function ConversationList({
     return result;
   }, [conversations, filter, search, selectedTagIds, selectedCompany]);
 
+  /**
+   * Bucket the filtered list by the contact's latest broadcast name.
+   * Order: buckets sorted by their newest conversation's `last_message_at`
+   * so the group with fresh replies floats to the top; contacts without
+   * any broadcast fall into the "No broadcast" bucket at the bottom.
+   */
+  const groups = useMemo(() => {
+    const NO_BROADCAST = "__no_broadcast__";
+    const buckets = new Map<
+      string,
+      { name: string; items: Conversation[]; latest: number }
+    >();
+    for (const conv of filtered) {
+      const info = broadcastByContact.get(conv.contact_id);
+      const key = info?.id ?? NO_BROADCAST;
+      const name = info?.name ?? t("noBroadcast");
+      const bucket = buckets.get(key) ?? { name, items: [], latest: 0 };
+      bucket.items.push(conv);
+      const ts = conv.last_message_at
+        ? new Date(conv.last_message_at).getTime()
+        : 0;
+      if (ts > bucket.latest) bucket.latest = ts;
+      buckets.set(key, bucket);
+    }
+    return [...buckets.entries()]
+      .map(([id, b]) => ({ id, name: b.name, items: b.items, latest: b.latest }))
+      // No-broadcast bucket last; everyone else newest-first.
+      .sort((a, b) => {
+        if (a.id === NO_BROADCAST) return 1;
+        if (b.id === NO_BROADCAST) return -1;
+        return b.latest - a.latest;
+      });
+  }, [filtered, broadcastByContact, t]);
+
+  const toggleGroup = useCallback((groupId: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  }, []);
+
   const toggleTag = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
       prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]
@@ -237,6 +335,20 @@ export function ConversationList({
         </div>
 
         <div className="flex flex-wrap items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setGroupByBroadcast((v) => !v)}
+            className={cn(
+              "inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs hover:bg-muted",
+              groupByBroadcast
+                ? "text-primary"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+            title={t("groupByBroadcast")}
+          >
+            <Megaphone className="h-3 w-3" />
+            {t("groupByBroadcast")}
+          </button>
           <DropdownMenu>
             <DropdownMenuTrigger className="inline-flex items-center justify-center h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground rounded-md hover:bg-muted">
                 {activeFilter?.label ?? t("filterAll")}
@@ -404,6 +516,54 @@ export function ConversationList({
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center">
             <p className="text-sm text-muted-foreground">{t("noConversations")}</p>
+          </div>
+        ) : groupByBroadcast ? (
+          <div className="flex flex-col">
+            {groups.map((group) => {
+              const collapsed = collapsedGroups.has(group.id);
+              const unread = group.items.reduce(
+                (n, c) => n + (c.unread_count > 0 ? 1 : 0),
+                0
+              );
+              return (
+                <div key={group.id} className="border-b border-border/60 last:border-b-0">
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group.id)}
+                    className="flex w-full items-center gap-2 bg-muted/40 px-3 py-2 text-left hover:bg-muted/60"
+                  >
+                    <ChevronRight
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform",
+                        !collapsed && "rotate-90"
+                      )}
+                    />
+                    <Megaphone className="h-3.5 w-3.5 shrink-0 text-primary" />
+                    <span className="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wide text-foreground">
+                      {group.name}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      {group.items.length}
+                    </span>
+                    {unread > 0 && (
+                      <span className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                        {unread}
+                      </span>
+                    )}
+                  </button>
+                  {!collapsed &&
+                    group.items.map((conv) => (
+                      <ConversationItem
+                        key={conv.id}
+                        conversation={conv}
+                        isActive={conv.id === activeConversationId}
+                        onSelect={handleSelect}
+                        t={t}
+                      />
+                    ))}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <div className="flex flex-col">

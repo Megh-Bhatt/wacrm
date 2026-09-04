@@ -149,7 +149,9 @@
       "clearAll": "Clear all",
       "noConversations": "No conversations found",
       "noMessagesYet": "No messages yet",
-      "unknown": "Unknown"
+      "unknown": "Unknown",
+      "groupByBroadcast": "Group by broadcast",
+      "noBroadcast": "No broadcast"
     },
     "messageThread": {
       "backToConversations": "Back to conversations",
@@ -809,7 +811,8 @@
         "fieldMap": {
           "name": "Name",
           "phone": "Phone",
-          "email": "Email"
+          "email": "Email",
+          "company": "Company"
         }
       },
       "scheduleSend": {

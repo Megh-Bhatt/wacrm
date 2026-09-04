@@ -27,6 +27,8 @@ import type { CustomField } from '@/types';
 export interface CsvContactRow {
   phone: string;
   name?: string;
+  email?: string;
+  company?: string;
   /** Keyed by `custom_fields.id`. Used for template-variable resolution
    *  during the send; not persisted to `contact_custom_values`. */
   customValues?: Record<string, string>;
@@ -221,6 +223,8 @@ export function CsvAudiencePanel({ onChange }: CsvAudiencePanelProps) {
 
     const phoneCol = mapping.indexOf('phone');
     const nameCol = mapping.indexOf('name');
+    const emailCol = mapping.indexOf('email');
+    const companyCol = mapping.indexOf('company');
     const phoneMapped = phoneCol >= 0;
 
     if (!phoneMapped) {
@@ -270,6 +274,8 @@ export function CsvAudiencePanel({ onChange }: CsvAudiencePanelProps) {
       seen.add(dedupeKey);
 
       const name = nameCol >= 0 ? (row[nameCol] ?? '').trim() : '';
+      const email = emailCol >= 0 ? (row[emailCol] ?? '').trim() : '';
+      const company = companyCol >= 0 ? (row[companyCol] ?? '').trim() : '';
 
       const customValues: Record<string, string> = {};
       for (const { colIndex, fieldId } of customCols) {
@@ -280,6 +286,8 @@ export function CsvAudiencePanel({ onChange }: CsvAudiencePanelProps) {
       out.push({
         phone: rawPhone,
         ...(name ? { name } : {}),
+        ...(email ? { email } : {}),
+        ...(company ? { company } : {}),
         ...(Object.keys(customValues).length > 0 ? { customValues } : {}),
       });
     }
