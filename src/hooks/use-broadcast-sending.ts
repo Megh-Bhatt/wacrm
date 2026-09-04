@@ -180,9 +180,20 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
    * write to `contact_custom_values`. Keyed by contact_id → field_id → value.
    * Empty (no CSV audience) is the common case.
    */
+  /**
+   * Built-in-field values a CSV row supplied, keyed by contact_id. Used
+   * to layer name/email/company from the CSV over the persisted contact
+   * row before variable resolution. A contact whose DB row has
+   * `company = null` but whose CSV cell says "A D Engineers" should
+   * still resolve {{company}} to "A D Engineers" — otherwise Meta
+   * rejects the send on an empty parameter.
+   */
+  type CsvFieldOverride = Partial<Pick<Contact, 'name' | 'email' | 'company'>>;
+
   interface ResolvedAudience {
     contacts: Contact[];
     csvOverrides: Map<string, Map<string, string>>;
+    csvFieldOverrides: Map<string, CsvFieldOverride>;
   }
 
   async function resolveAudience(
@@ -192,6 +203,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
     let contacts: Contact[] = [];
     let csvOverrides: Map<string, Map<string, string>> = new Map();
+    let csvFieldOverrides: Map<string, CsvFieldOverride> = new Map();
 
     if (audience.type === 'all') {
       const { data, error } = await supabase.from('contacts').select('*');
@@ -227,6 +239,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       const upsertResult = await upsertCsvContacts(supabase, audience.csvContacts);
       contacts = upsertResult.contacts;
       csvOverrides = upsertResult.csvOverrides;
+      csvFieldOverrides = upsertResult.csvFieldOverrides;
     }
 
     // Apply exclude tags (works across all contact-derived audience
@@ -240,7 +253,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       contacts = contacts.filter((c) => !excludedIds.has(c.id));
     }
 
-    return { contacts, csvOverrides };
+    return { contacts, csvOverrides, csvFieldOverrides };
   }
 
   /**
@@ -257,6 +270,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
   interface CsvUpsertResult {
     contacts: Contact[];
     csvOverrides: Map<string, Map<string, string>>;
+    csvFieldOverrides: Map<string, CsvFieldOverride>;
   }
 
   async function upsertCsvContacts(
@@ -270,7 +284,11 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     }[],
   ): Promise<CsvUpsertResult> {
     if (csvRows.length === 0) {
-      return { contacts: [], csvOverrides: new Map() };
+      return {
+        contacts: [],
+        csvOverrides: new Map(),
+        csvFieldOverrides: new Map(),
+      };
     }
 
     const {
@@ -402,20 +420,37 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     // contact_id → field_id → value; only rows with real customValues
     // contribute, so the map stays empty for CSVs with no custom mapping.
     const csvOverrides = new Map<string, Map<string, string>>();
+    // Same idea for built-in fields (name/email/company): a contact
+    // row from a prior CSV import (or the AI onboarding path) may have
+    // `company = null`, but the current CSV cell has it. Meta rejects
+    // an empty template parameter, so we want the CSV value to win at
+    // send time without a write back to the contacts table.
+    const csvFieldOverrides = new Map<string, CsvFieldOverride>();
     for (const k of keys) {
       const row = uniqueByKey.get(k);
       const contact = byKey.get(k);
-      if (!row?.customValues || !contact) continue;
-      const bucket = new Map<string, string>();
-      for (const [fieldId, value] of Object.entries(row.customValues)) {
-        if (value !== undefined && value !== null && value !== '') {
-          bucket.set(fieldId, value);
+      if (!row || !contact) continue;
+
+      if (row.customValues) {
+        const bucket = new Map<string, string>();
+        for (const [fieldId, value] of Object.entries(row.customValues)) {
+          if (value !== undefined && value !== null && value !== '') {
+            bucket.set(fieldId, value);
+          }
         }
+        if (bucket.size > 0) csvOverrides.set(contact.id, bucket);
       }
-      if (bucket.size > 0) csvOverrides.set(contact.id, bucket);
+
+      const fieldBucket: CsvFieldOverride = {};
+      if (row.name) fieldBucket.name = row.name;
+      if (row.email) fieldBucket.email = row.email;
+      if (row.company) fieldBucket.company = row.company;
+      if (Object.keys(fieldBucket).length > 0) {
+        csvFieldOverrides.set(contact.id, fieldBucket);
+      }
     }
 
-    return { contacts, csvOverrides };
+    return { contacts, csvOverrides, csvFieldOverrides };
   }
 
   async function resolveCustomFieldAudience(
@@ -476,7 +511,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
       // ── Step 1: Resolve audience contacts ─────────────────────────
       setProgress(5);
-      const { contacts, csvOverrides } = await resolveAudience(payload.audience);
+      const { contacts, csvOverrides, csvFieldOverrides } = await resolveAudience(
+        payload.audience,
+      );
 
       if (contacts.length === 0) {
         throw new Error('No contacts found for this audience.');
@@ -542,12 +579,22 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         return merged;
       }
 
+      // Layer CSV-supplied name/email/company onto the DB contact before
+      // resolving template variables. A pre-existing contact whose DB row
+      // has `company = null` still resolves {{company}} to the CSV cell
+      // value — otherwise Meta rejects the send on an empty parameter.
+      function contactFor(contact: Contact): Contact {
+        const override = csvFieldOverrides.get(contact.id);
+        if (!override) return contact;
+        return { ...contact, ...override };
+      }
+
       const paramsByContact = new Map(
         contacts.map((contact) => [
           contact.id,
           resolveVariables(
             payload.variables,
-            contact,
+            contactFor(contact),
             customValuesFor(contact.id),
           ),
         ]),

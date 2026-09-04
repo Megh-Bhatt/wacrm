@@ -22,6 +22,19 @@ interface VariableMapping {
   value: string;
 }
 
+/**
+ * Minimal shape of a CSV audience row, mirroring
+ * `AudienceConfig.csvContacts[number]` from use-broadcast-sending.
+ * Kept local so the preview can pull a real CSV row without importing
+ * the full AudienceConfig type.
+ */
+interface PreviewCsvRow {
+  phone: string;
+  name?: string;
+  email?: string;
+  company?: string;
+}
+
 interface Step3Props {
   template: MessageTemplate;
   variables: Record<string, VariableMapping>;
@@ -29,6 +42,11 @@ interface Step3Props {
   /** Media URL for an IMAGE/VIDEO/DOCUMENT header, when the template has one. */
   headerMediaUrl: string;
   onHeaderMediaUrlChange: (url: string) => void;
+  /** First row of the CSV audience, when the audience is a CSV upload.
+   *  Used to render the live preview with the CSV's own name/company so
+   *  {{company}} previews as the CSV cell value even when the persisted
+   *  contact row's `company` column is empty. */
+  previewCsvRow?: PreviewCsvRow | null;
   onNext: () => void;
   onBack: () => void;
 }
@@ -74,6 +92,7 @@ export function Step3Personalize({
   onUpdate,
   headerMediaUrl,
   onHeaderMediaUrlChange,
+  previewCsvRow,
   onNext,
   onBack,
 }: Step3Props) {
@@ -193,10 +212,23 @@ export function Step3Personalize({
    * possible. Placeholders keyed by "{{N}}" map to variable key "N".
    */
   const previewText = useMemo(() => {
-    const contact = firstContact ?? SAMPLE_CONTACT;
-    const customValues = firstContact
-      ? firstContactCustomValues
-      : new Map<string, string>();
+    // For CSV audiences, preview against the CSV's first row so the
+    // user sees {{company}} resolve to their CSV cell — not against the
+    // newest DB contact (which typically has `company = null` for
+    // freshly-imported CSV contacts and would leave {{2}} unreplaced).
+    const contact: Contact = previewCsvRow
+      ? {
+          ...SAMPLE_CONTACT,
+          name: previewCsvRow.name ?? SAMPLE_CONTACT.name,
+          phone: previewCsvRow.phone,
+          email: previewCsvRow.email ?? '',
+          company: previewCsvRow.company ?? '',
+        }
+      : firstContact ?? SAMPLE_CONTACT;
+    const customValues =
+      !previewCsvRow && firstContact
+        ? firstContactCustomValues
+        : new Map<string, string>();
 
     let text = template.body_text;
     for (const placeholder of placeholders) {
@@ -228,11 +260,14 @@ export function Step3Personalize({
     placeholders,
     firstContact,
     firstContactCustomValues,
+    previewCsvRow,
   ]);
 
-  const previewLabel = firstContact
-    ? firstContact.name || firstContact.phone
-    : t('personalize.previewSample');
+  const previewLabel = previewCsvRow
+    ? previewCsvRow.name || previewCsvRow.phone
+    : firstContact
+      ? firstContact.name || firstContact.phone
+      : t('personalize.previewSample');
 
   return (
     <div className="space-y-6">

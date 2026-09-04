@@ -211,6 +211,9 @@ export default function NewBroadcastPage() {
               onUpdate={setVariables}
               headerMediaUrl={headerMediaUrl}
               onHeaderMediaUrlChange={setHeaderMediaUrl}
+              previewCsvRow={
+                audience.type === 'csv' ? audience.csvContacts?.[0] ?? null : null
+              }
               onNext={() => setCurrentStep(3)}
               onBack={() => setCurrentStep(1)}
             />
